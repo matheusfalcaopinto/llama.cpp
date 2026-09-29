@@ -10,6 +10,9 @@ the JSON object is assembled by code, so it always matches the schema.
 This directory holds the engine (`decision-engine.*`), a CLI (`llama-parallel-decision`), and the engine is also
 served by `llama-server` as `POST /v1/decision`.
 
+On the `codex/decision-vision` branch, the server also supports native image and multi-image contexts.
+See [the visual API](README-vision.md) and [Decision Studio](../decision-studio/README.md).
+
 ## Build
 
 Same as llama.cpp:
@@ -61,8 +64,9 @@ single pass; the padding comes after the token that is read, so it doesn't chang
 
 ## POST /v1/decision
 
-`contexts` is a list of 1-256 strings. They share one schema, one set of instructions, and one cached prefix; results
-come back in the same order.
+For text-only requests, `contexts` is a list of 1-256 strings. They share one schema, one set of instructions,
+and one cached prefix; results come back in the same order. Visual objects use the separate preparation path
+documented in [README-vision.md](README-vision.md).
 
 ```bash
 curl http://localhost:8096/v1/decision -H "Content-Type: application/json" -d '{

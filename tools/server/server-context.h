@@ -23,6 +23,7 @@ struct server_context_meta {
     bool has_inp_image;
     bool has_inp_audio;
     bool has_inp_video;
+    bool has_decision;
     json json_ui_settings;
     int slot_n_ctx;
     enum llama_pooling_type pooling_type;

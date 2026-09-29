@@ -4,6 +4,7 @@
 #include "llama.h"
 
 #include <string>
+#include <atomic>
 #include <unordered_set>
 #include <list>
 #include <map>
@@ -175,6 +176,7 @@ struct server_task {
 
     // used by SERVER_TASK_TYPE_DECISION: the request body
     json decision_request;
+    std::shared_ptr<std::atomic<bool>> decision_cancelled;
 
     // used by SERVER_TASK_TYPE_SET_LORA
     std::map<int, float> set_lora; // mapping adapter ID -> scale

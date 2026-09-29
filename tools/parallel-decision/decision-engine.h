@@ -14,6 +14,7 @@
 #include "json.h"
 
 #include <string>
+#include <functional>
 #include <utility>
 #include <vector>
 
@@ -34,7 +35,15 @@ struct options {
     size_t      tree_max       = 128;
     bool        split_boundary = false;  // legacy: tokenise suffix and values separately
     bool        allow_cache    = true;   // reuse the cached static prefix when it matches
+    std::function<bool()> should_stop;
 };
+
+struct prefill_result {
+    llama_pos next_pos;
+    size_t    context_tokens;
+};
+
+using prefill_fn = std::function<prefill_result(llama_seq_id)>;
 
 struct field_result {
     int                winner       = -1;
@@ -82,6 +91,10 @@ class engine {
     batch_result decide_batch(const std::string & shared_text, const std::vector<std::string> & contexts,
                               const std::vector<field_input> & fields, const options & opt);
 
+    // Each callback fills the supplied sequence from position zero. No cross-request prefix cache.
+    batch_result decide_prepared(const std::vector<prefill_fn> & contexts,
+                                 const std::vector<field_input> & fields, const options & opt);
+
   private:
     struct prompt_part {
         const tokens_t * toks;
@@ -104,9 +117,13 @@ class engine {
     tokens_t            cached;
 
     tokens_t tokenize(const std::string & text, bool add_special) const;
+    batch_result decide_impl(const tokens_t & shared, const std::vector<tokens_t> & prefixes,
+                             const std::vector<prefill_fn> & prepared,
+                             const std::vector<field_input> & fields, const options & opt);
     void     decode_parts(const std::vector<prompt_part> & parts);
     bool     prepare_prefix(const tokens_t & shared, bool allow_cache);
-    std::vector<std::vector<float>> score_branches(const std::vector<branch> & branches, llama_seq_id first, int n_free);
+    std::vector<std::vector<float>> score_branches(const std::vector<branch> & branches, llama_seq_id first, int n_free,
+                                                  const std::function<bool()> & should_stop);
 };
 
 // ---- schema compiler (the C++ counterpart of llama-mojo's tools/prepare_decisions.py)
@@ -138,6 +155,6 @@ std::pair<std::string, std::string> render_prompt(const common_chat_templates * 
                                                   const std::string & system_text, const std::string & context);
 
 // {"decision": {...}, "fields": {...}} from the scores, applying each numeric field's aggregate.
-common_json assemble(const compiled_schema & cs, const result & r);
+common_json assemble(const compiled_schema & cs, const result & r, bool return_distribution = false);
 
 } // namespace llama_decision

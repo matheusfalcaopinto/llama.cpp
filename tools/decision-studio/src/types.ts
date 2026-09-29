@@ -1,0 +1,112 @@
+export type SchemaField = {
+  type: string;
+  description: string;
+  choices?: string[];
+  enum?: string[];
+  minimum?: number;
+  maximum?: number;
+  step?: number;
+  aggregate?: string;
+};
+export type Config = {
+  pipeline: "native_decision" | "vision_json";
+  provider_id: string;
+  model: string;
+  grouping: "individual" | "together" | "directory";
+  video_group_size: number;
+  instructions: string;
+  context: string;
+  output_schema: Record<string, SchemaField>;
+  decision_mode: "auto" | "tree" | "greedy";
+  tree_max: number;
+  cache_prompt: boolean;
+  batch_size: number;
+  temperature: number;
+  top_p: number;
+  max_tokens: number;
+  seed: number | null;
+  image_max_side: number;
+  jpeg_quality: number;
+  video_mode: "interval" | "all";
+  frame_interval: number;
+  max_frames: number;
+  start_seconds: number;
+  end_seconds: number | null;
+  review_threshold: number;
+};
+export type Provider = {
+  id: string;
+  name: string;
+  base_url: string;
+  protocol: "llama_cpp";
+  api_key?: string;
+  has_api_key?: boolean;
+  timeout_seconds: number;
+};
+export type Media = {
+  id: string;
+  name: string;
+  relative_path: string;
+  kind: "image" | "video";
+  size: number;
+  width: number;
+  height: number;
+  duration?: number;
+  fps?: number;
+  frame_count?: number;
+};
+export type ModelInfo = {
+  id: string;
+  decision?: { enabled: boolean; vision: boolean; version: number };
+};
+export type Probe = {
+  ok: boolean;
+  message: string;
+  models: ModelInfo[];
+  latency_ms: number;
+};
+export type Job = {
+  id: string;
+  name: string;
+  status: string;
+  created_at: string;
+  completed: number;
+  total: number;
+  failed: number;
+  review: number;
+  warnings: string[];
+  error?: string;
+  elapsed_ms?: number;
+  config: Config;
+  media_ids: string[];
+  provider: Provider;
+};
+export type Sample = {
+  name: string;
+  relative_path: string;
+  media_id: string;
+  timestamp: number | null;
+  frame_index: number | null;
+};
+export type ResultField = {
+  value: string | boolean | number;
+  probability: number | null;
+  tree?: boolean;
+  expected_value?: number;
+  distribution?: { value: unknown; probability: number }[] | null;
+  interval_p10_p90?: number[];
+};
+export type Result = {
+  seq: number;
+  samples: Sample[];
+  fields?: Record<string, ResultField>;
+  decision?: unknown;
+  status: string;
+  error?: string;
+  needs_review: boolean;
+  amortized_ms?: number;
+  usage?: Record<string, number>;
+  raw?: unknown;
+  request?: unknown;
+  score_kind?: string;
+};

@@ -23,6 +23,7 @@
 #include <cinttypes>
 #include <exception>
 #include <memory>
+#include <numeric>
 #include <filesystem>
 #include <random>
 #include <utility>
@@ -2379,20 +2380,53 @@ private:
     // returns false to decline the task, it is offered again after the decode is done
     // POST /decision: answer a finite JSON schema in one batched pass on this thread.
     // Uses the sequence ids above the slots reserved by --decision-seqs (see tools/parallel-decision).
-    json handle_decision(const json & body) {
+    json handle_decision(const json & body, const std::shared_ptr<std::atomic<bool>> & cancelled) {
         if (params_base.n_seq_decision < 3) {
             throw std::invalid_argument("decisions are disabled: start the server with --decision-seqs N (N >= 3)");
         }
         // one decision per context; all contexts share the schema, the instructions and the cached prefix
         if (!body.contains("contexts") || !body.at("contexts").is_array() || body.at("contexts").empty() || body.at("contexts").size() > 256) {
-            throw std::invalid_argument("\"contexts\" must be an array of 1-256 strings");
+            throw std::invalid_argument("contexts must contain 1-256 strings or content objects");
         }
-        std::vector<std::string> contexts;
-        for (const auto & c : body.at("contexts")) {
-            if (!c.is_string() || c.get<std::string>().empty()) {
-                throw std::invalid_argument("every entry of \"contexts\" must be a non-empty string");
+        const auto & contexts = body.at("contexts");
+        bool prepared_input = false;
+        size_t total_images = 0;
+        std::vector<size_t> image_counts(contexts.size(), 0), image_tokens(contexts.size(), 0);
+        for (size_t i = 0; i < contexts.size(); ++i) {
+            const auto & c = contexts[i];
+            if (c.is_string()) {
+                if (c.get<std::string>().empty()) {
+                    throw std::invalid_argument("text contexts must not be empty");
+                }
+                continue;
             }
-            contexts.push_back(c.get<std::string>());
+            prepared_input = true;
+            if (!c.is_object() || !c.contains("content") || !c.at("content").is_array() || c.at("content").empty()) {
+                throw std::invalid_argument("a visual context needs a non-empty content array");
+            }
+            for (const auto & part : c.at("content")) {
+                const auto type = part.value("type", std::string());
+                if (type == "text") {
+                    if (!part.contains("text") || !part.at("text").is_string()) {
+                        throw std::invalid_argument("text parts need a text string");
+                    }
+                } else if (type == "image_url") {
+                    const auto url = part.at("image_url").at("url").get<std::string>();
+                    if ((url.rfind("data:image/jpeg;base64,", 0) != 0 && url.rfind("data:image/png;base64,", 0) != 0) || url.size() > 8 * 1024 * 1024) {
+                        throw std::invalid_argument("decision images must be JPEG/PNG base64 data URLs, at most 8 MiB each");
+                    }
+                    ++image_counts[i];
+                    ++total_images;
+                } else {
+                    throw std::invalid_argument("decision content supports text and image_url only");
+                }
+            }
+            if (image_counts[i] > 16 || total_images > 64) {
+                throw std::invalid_argument("at most 16 images per context and 64 per request are allowed");
+            }
+        }
+        if (prepared_input && (!mctx || !mtmd_support_vision(mctx))) {
+            throw std::invalid_argument("visual decisions require a vision model and compatible --mmproj");
         }
         if (!body.contains("schema")) {
             throw std::invalid_argument("\"schema\" must be provided");
@@ -2402,23 +2436,100 @@ private:
                                                                         params_base.n_seq_decision);
         }
         const auto cs = llama_decision::compile_schema(body.at("schema"), body.value("instructions", std::string()));
+        if (cs.inputs.size() > 64) {
+            throw std::invalid_argument("at most 64 decision fields are allowed");
+        }
         std::string shared;
         std::vector<std::string> dynamic;
-        for (const auto & c : contexts) {
-            auto [head, tail] = llama_decision::render_prompt(chat_params.tmpls.get(), chat_params.use_jinja, cs.system_text, c);
-            if (dynamic.empty()) {
-                shared = head;
-            } else if (head != shared) {
-                throw std::runtime_error("the chat template renders a different prefix per context");
+        if (!prepared_input) {
+            for (const auto & c : contexts) {
+                auto [head, tail] = llama_decision::render_prompt(chat_params.tmpls.get(), chat_params.use_jinja, cs.system_text, c.get<std::string>());
+                if (dynamic.empty()) {
+                    shared = head;
+                } else if (head != shared) {
+                    throw std::runtime_error("the chat template renders a different prefix per context");
+                }
+                dynamic.push_back(tail);
             }
-            dynamic.push_back(tail);
         }
         llama_decision::options opt;
         opt.mode        = body.value("mode", std::string("auto"));
-        opt.tree_max    = (size_t) body.value("tree_max", 128);
+        const int tree_max = body.value("tree_max", 128);
+        if (tree_max < 1 || tree_max > 255) {
+            throw std::invalid_argument("tree_max must be between 1 and 255");
+        }
+        opt.tree_max    = (size_t) tree_max;
         opt.allow_cache = body.value("cache_prompt", true);
-
-        const auto b = decision_engine->decide_batch(shared, dynamic, cs.inputs, opt);
+        opt.should_stop = [cancelled]() { return cancelled && cancelled->load(); };
+        auto check_stop = [&]() {
+            if (opt.should_stop()) {
+                throw std::runtime_error("decision cancelled");
+            }
+        };
+        double vision_encode_ms = 0;
+        std::vector<llama_decision::prefill_fn> prepared;
+        if (prepared_input) {
+            for (size_t i = 0; i < contexts.size(); ++i) {
+                prepared.push_back([&, i](llama_seq_id seq) -> llama_decision::prefill_result {
+                    check_stop();
+                    json chat = {
+                        {"messages", json::array({
+                            {{"role", "system"}, {"content", cs.system_text}},
+                            {{"role", "user"}, {"content", contexts[i].is_string() ? contexts[i] : contexts[i].at("content")}}
+                        })},
+                        {"chat_template_kwargs", {{"enable_thinking", false}}}
+                    };
+                    std::vector<raw_buffer> files;
+                    const auto parsed = oaicompat_chat_params_parse(chat, chat_params, files);
+                    auto tokens = [&]() {
+                        try {
+                            return process_mtmd_prompt(mctx, parsed.at("prompt").get<std::string>() + "{\n", files, init_opt);
+                        } catch (const std::runtime_error & e) {
+                            throw std::invalid_argument(std::string("invalid decision image: ") + e.what());
+                        }
+                    }();
+                    if (tokens.size() >= llama_n_ctx(ctx_tgt)) {
+                        throw std::invalid_argument("visual decision prompt exceeds context capacity");
+                    }
+                    llama_pos pos = 0;
+                    size_t idx = 0;
+                    while (idx < tokens.size()) {
+                        check_stop();
+                        if (tokens[idx] == LLAMA_TOKEN_NULL) {
+                            const auto & chunk = tokens.find_chunk(idx);
+                            if (mtmd_input_chunk_get_type(chunk.get()) != MTMD_INPUT_CHUNK_TYPE_IMAGE) {
+                                throw std::invalid_argument("only image chunks are allowed in visual decisions");
+                            }
+                            const auto t0 = ggml_time_us();
+                            if (mtmd_encode_chunk(mctx, chunk.get()) != 0) {
+                                throw std::runtime_error("failed to encode decision image");
+                            }
+                            vision_encode_ms += (ggml_time_us() - t0) / 1000.0;
+                            check_stop();
+                            if (mtmd_helper_decode_image_chunk(mctx, ctx_tgt, chunk.get(), mtmd_get_output_embd(mctx), pos, seq, llama_n_batch(ctx_tgt), &pos, nullptr, nullptr) != 0) {
+                                throw std::runtime_error("failed to prefill decision image; check context and KV capacity");
+                            }
+                            const auto n = mtmd_input_chunk_get_n_tokens(chunk.get());
+                            image_tokens[i] += n;
+                            idx += n;
+                        } else {
+                            auto batch = llama_batch_init(llama_n_batch(ctx_tgt), 0, 1);
+                            while (idx < tokens.size() && tokens[idx] != LLAMA_TOKEN_NULL && batch.n_tokens < (int) llama_n_batch(ctx_tgt)) {
+                                common_batch_add(batch, tokens[idx++], pos++, {seq}, false);
+                            }
+                            const int rc = llama_decode(ctx_tgt, batch);
+                            llama_batch_free(batch);
+                            if (rc != 0) {
+                                throw std::runtime_error("failed to prefill decision text; check context and KV capacity");
+                            }
+                        }
+                    }
+                    return { pos, tokens.size() };
+                });
+            }
+        }
+        const auto b = prepared_input ? decision_engine->decide_prepared(prepared, cs.inputs, opt)
+                                      : decision_engine->decide_batch(shared, dynamic, cs.inputs, opt);
 
         size_t context_tokens = 0;
         for (const auto & r : b.items) {
@@ -2429,17 +2540,23 @@ private:
         usage["cached_tokens"]  = (long long) (b.cache_hit ? b.shared_tokens : 0);
         usage["context_tokens"] = (long long) context_tokens;
         usage["scored_rows"]    = b.rows;
+        usage["images"]         = total_images;
+        usage["image_tokens"]   = std::accumulate(image_tokens.begin(), image_tokens.end(), size_t(0));
         json timings = json::object();
         timings["prefill_ms"] = b.prefill_ms;
+        timings["vision_encode_ms"] = vision_encode_ms;
         timings["scoring_ms"] = b.scoring_ms;
         timings["total_ms"]   = b.prefill_ms + b.scoring_ms;
         timings["rounds"]     = b.rounds;
         timings["per_decision_ms"] = (b.prefill_ms + b.scoring_ms) / (double) b.items.size();
 
         json results = json::array();
-        for (const auto & r : b.items) {
-            json item = llama_decision::assemble(cs, r);
+        for (size_t i = 0; i < b.items.size(); ++i) {
+            const auto & r = b.items[i];
+            json item = llama_decision::assemble(cs, r, body.value("return_distribution", false));
             item["usage"] = { { "context_tokens", (long long) r.context_tokens }, { "scored_rows", r.rows } };
+            item["usage"]["images"] = image_counts[i];
+            item["usage"]["image_tokens"] = image_tokens[i];
             results.push_back(item);
         }
         json out = json::object();
@@ -2583,7 +2700,7 @@ private:
                     try {
                         auto res  = std::make_unique<server_task_result_decision>();
                         res->id   = task.id;
-                        res->data = handle_decision(task.decision_request);
+                        res->data = handle_decision(task.decision_request, task.decision_cancelled);
                         queue_results.send(std::move(res));
                     } catch (const std::invalid_argument & e) {
                         send_error(task, e.what(), ERROR_TYPE_INVALID_REQUEST);
@@ -4291,6 +4408,7 @@ server_context_meta server_context::get_meta() const {
         /* has_inp_image          */ impl->chat_params.allow_image,
         /* has_inp_audio          */ impl->chat_params.allow_audio,
         /* has_inp_video          */ impl->chat_params.allow_video,
+        /* has_decision           */ impl->params_base.n_seq_decision >= 3,
         /* json_ui_settings       */ impl->json_ui_settings,
         /* slot_n_ctx             */ impl->n_ctx_slot(),
         /* pooling_type           */ llama_pooling_type(impl->ctx_tgt),
@@ -4645,6 +4763,15 @@ static json get_res_model_info(const server_context_meta & meta) {
         {"object",   "model"},
         {"created",  std::time(0)},
         {"owned_by", "llamacpp"},
+        {"decision", {
+            {"enabled", meta.has_decision},
+            {"vision", meta.has_decision && meta.has_inp_image},
+            {"version", 1},
+            {"max_images_per_context", 16},
+            {"max_images_per_request", 64},
+            {"max_request_bytes", 32 * 1024 * 1024},
+            {"distributions", true},
+        }},
         {"meta",     {
             {"vocab_type",  meta.model_vocab_type},
             {"n_vocab",     meta.model_vocab_n_tokens},
@@ -5241,14 +5368,26 @@ void server_routes::init_routes() {
 
     this->post_decision = [this](const server_http_req & req) {
         auto res = create_response();
+        if (req.body.size() > 32 * 1024 * 1024) {
+            res->error(format_error_response("decision request exceeds 32 MiB", ERROR_TYPE_INVALID_REQUEST));
+            return res;
+        }
         const json body = json::parse(req.body);
 
         server_task task(SERVER_TASK_TYPE_DECISION);
         task.id               = res->rd.get_new_id();
         task.decision_request = body;
+        auto cancelled = std::make_shared<std::atomic<bool>>(false);
+        task.decision_cancelled = cancelled;
         res->rd.post_task(std::move(task));
 
-        auto result = res->rd.next([&] { return req.should_stop(); });
+        auto result = res->rd.next([&] {
+            if (req.should_stop()) {
+                cancelled->store(true);
+                return true;
+            }
+            return false;
+        });
         if (!result) {
             return res; // the client went away
         }

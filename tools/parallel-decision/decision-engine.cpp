@@ -243,7 +243,8 @@ bool engine::prepare_prefix(const tokens_t & shared, bool allow_cache) {
 // passes. There each group is right-padded to its longest branch (longest first, so padding stays
 // small). Every layer is causal, so the logits read at a branch's last real token don't see the
 // padding, and the padded cells are removed with the branch.
-std::vector<std::vector<float>> engine::score_branches(const std::vector<branch> & branches, llama_seq_id first, int n_free) {
+std::vector<std::vector<float>> engine::score_branches(const std::vector<branch> & branches, llama_seq_id first, int n_free,
+                                                       const std::function<bool()> & should_stop) {
     std::vector<std::vector<float>> result(branches.size());
     std::vector<size_t> order(branches.size());
     for (size_t b = 0; b < order.size(); ++b) {
@@ -257,6 +258,9 @@ std::vector<std::vector<float>> engine::score_branches(const std::vector<branch>
     const int max_rows = (int) llama_n_batch(ctx);
     size_t start = 0;
     while (start < order.size()) {
+        if (should_stop && should_stop()) {
+            throw std::runtime_error("decision cancelled");
+        }
         const int width = (int) branches[order[start]].toks.size(); // padded length of this group
         size_t end  = start;
         int    rows = 0;
@@ -319,12 +323,6 @@ result engine::decide(const std::string & shared_text, const std::string & conte
 
 batch_result engine::decide_batch(const std::string & shared_text, const std::vector<std::string> & contexts,
                                   const std::vector<field_input> & inputs, const options & opt) {
-    if (opt.mode != "auto" && opt.mode != "tree" && opt.mode != "greedy") {
-        throw std::invalid_argument("mode must be auto, tree or greedy");
-    }
-    if (contexts.empty()) {
-        throw std::invalid_argument("a decision needs at least one context");
-    }
     const tokens_t shared = tokenize(shared_text, true);
     std::vector<tokens_t> prefixes;
     for (const auto & text : contexts) {
@@ -333,6 +331,40 @@ batch_result engine::decide_batch(const std::string & shared_text, const std::ve
             throw std::invalid_argument("the decision context must not be empty");
         }
     }
+    return decide_impl(shared, prefixes, {}, inputs, opt);
+}
+
+batch_result engine::decide_prepared(const std::vector<prefill_fn> & contexts,
+                                     const std::vector<field_input> & inputs, const options & opt) {
+    return decide_impl({}, {}, contexts, inputs, opt);
+}
+
+batch_result engine::decide_impl(const tokens_t & shared, const std::vector<tokens_t> & prefixes,
+                                 const std::vector<prefill_fn> & prepared,
+                                 const std::vector<field_input> & inputs, const options & opt) {
+    const size_t n_contexts = prepared.empty() ? prefixes.size() : prepared.size();
+    if (opt.mode != "auto" && opt.mode != "tree" && opt.mode != "greedy") {
+        throw std::invalid_argument("mode must be auto, tree or greedy");
+    }
+    if (n_contexts == 0) {
+        throw std::invalid_argument("a decision needs at least one context");
+    }
+    auto check_stop = [&]() {
+        if (opt.should_stop && opt.should_stop()) {
+            throw std::runtime_error("decision cancelled");
+        }
+    };
+    struct sequence_guard {
+        llama_memory_t mem;
+        llama_seq_id first;
+        int count;
+        ~sequence_guard() {
+            for (int i = 0; i < count; ++i) {
+                llama_memory_seq_rm(mem, first + i, -1, -1);
+            }
+        }
+    } guard { mem, seq_pool, n_pool };
+    check_stop();
 
     std::vector<decision_field> fields;
     int total    = 0;
@@ -393,29 +425,41 @@ batch_result engine::decide_batch(const std::string & shared_text, const std::ve
 
     batch_result out;
     out.shared_tokens = shared.size();
-    out.rows          = total * (int) contexts.size();
-    out.items.resize(contexts.size());
+    out.rows          = total * (int) n_contexts;
+    out.items.resize(n_contexts);
 
     const auto t0 = std::chrono::steady_clock::now();
     out.cache_hit = prepare_prefix(shared, opt.allow_cache);
     out.prefill_ms += ms_since(t0);
 
     // each context in a group holds one trunk sequence; the rest of the pool scores branches
-    const size_t per_group = std::clamp<size_t>(n_pool / (1 + branches), 1, contexts.size());
-    for (size_t g0 = 0; g0 < contexts.size(); g0 += per_group) {
-        const size_t n_group = std::min(per_group, contexts.size() - g0);
+    const size_t per_group = prepared.empty() ? std::clamp<size_t>(n_pool / (1 + branches), 1, n_contexts) : 1;
+    for (size_t g0 = 0; g0 < n_contexts; g0 += per_group) {
+        check_stop();
+        const size_t n_group = std::min(per_group, n_contexts - g0);
 
         const auto tp = std::chrono::steady_clock::now();
         std::vector<prompt_part> parts;
+        std::vector<prefill_result> prefilled(n_group);
         for (size_t i = 0; i < n_group; ++i) {
             const llama_seq_id trunk = seq_pool + (llama_seq_id) i;
             llama_memory_seq_rm(mem, trunk, -1, -1);
             if (!shared.empty()) {
                 llama_memory_seq_cp(mem, seq_snap, trunk, -1, -1);
             }
-            parts.push_back({ &prefixes[g0 + i], (llama_pos) shared.size(), trunk });
+            if (prepared.empty()) {
+                parts.push_back({ &prefixes[g0 + i], (llama_pos) shared.size(), trunk });
+                prefilled[i] = { (llama_pos) (shared.size() + prefixes[g0 + i].size()), prefixes[g0 + i].size() };
+            } else {
+                prefilled[i] = prepared[g0 + i](trunk);
+                if (prefilled[i].next_pos <= 0 || prefilled[i].context_tokens == 0) {
+                    throw std::invalid_argument("prepared context is empty");
+                }
+            }
         }
-        decode_parts(parts);
+        if (!parts.empty()) {
+            decode_parts(parts);
+        }
         llama_synchronize(ctx); // llama_decode is asynchronous: wait for the prefill so its time isn't billed to scoring
         out.prefill_ms += ms_since(tp);
 
@@ -425,11 +469,12 @@ batch_result engine::decide_batch(const std::string & shared_text, const std::ve
         std::vector<std::vector<decision_field>> state(n_group, fields);
         bool first = true;
         while (true) {
+            check_stop();
             std::vector<branch> todo;
             std::vector<std::pair<size_t, size_t>> owner; // (context in group, field)
             for (size_t i = 0; i < n_group; ++i) {
                 const llama_seq_id trunk = seq_pool + (llama_seq_id) i;
-                const llama_pos    pos0  = (llama_pos) (shared.size() + prefixes[g0 + i].size());
+                const llama_pos    pos0  = prefilled[i].next_pos;
                 for (size_t f = 0; f < state[i].size(); ++f) {
                     auto & fd = state[i][f];
                     if (fd.use_tree) {
@@ -455,7 +500,7 @@ batch_result engine::decide_batch(const std::string & shared_text, const std::ve
             if (todo.empty()) {
                 break;
             }
-            const auto scores = score_branches(todo, seq_pool + (llama_seq_id) n_group, n_pool - (int) n_group);
+            const auto scores = score_branches(todo, seq_pool + (llama_seq_id) n_group, n_pool - (int) n_group, opt.should_stop);
             out.rounds += 1;
             std::vector<std::vector<std::vector<std::vector<float>>>> tree_scores(n_group, std::vector<std::vector<std::vector<float>>>(fields.size()));
             for (size_t row = 0; row < owner.size(); ++row) {
@@ -487,7 +532,7 @@ batch_result engine::decide_batch(const std::string & shared_text, const std::ve
         for (size_t i = 0; i < n_group; ++i) {
             llama_memory_seq_rm(mem, seq_pool + (llama_seq_id) i, -1, -1);
             result & r = out.items[g0 + i];
-            r.context_tokens = prefixes[g0 + i].size();
+            r.context_tokens = prefilled[i].context_tokens;
             r.rows           = total;
             for (auto & fd : state[i]) {
                 if (fd.use_tree && fd.probs.empty()) {
@@ -688,7 +733,7 @@ std::pair<std::string, std::string> render_prompt(const common_chat_templates * 
     return { prompt.substr(0, at), context + prompt.substr(at + sentinel.size()) + "{\n" };
 }
 
-common_json assemble(const compiled_schema & cs, const result & r) {
+common_json assemble(const compiled_schema & cs, const result & r, bool return_distribution) {
     common_json decision = common_json::object();
     common_json fields   = common_json::object();
     for (size_t i = 0; i < cs.specs.size(); ++i) {
@@ -717,6 +762,9 @@ common_json assemble(const compiled_schema & cs, const result & r) {
             for (size_t k = 0; k < sp.numbers.size(); ++k) {
                 mean += sp.numbers[k] * fr.probs[k];
             }
+            if (return_distribution) {
+                f["expected_value"] = mean;
+            }
             if (sp.aggregate == "median") {
                 idx = quantile(0.5);
             } else if (sp.aggregate == "mean") {
@@ -740,6 +788,17 @@ common_json assemble(const compiled_schema & cs, const result & r) {
         f["probability"]  = (double) (fr.probs.size() == sp.values.size() ? fr.probs[idx] : fr.path_score);
         f["scored_nodes"] = fr.scored_nodes;
         f["tree"]         = fr.tree;
+        if (return_distribution) {
+            if (fr.probs.size() == sp.values.size()) {
+                auto distribution = common_json::array();
+                for (size_t k = 0; k < sp.values.size(); ++k) {
+                    distribution.push_back({ { "value", sp.values[k] }, { "probability", fr.probs[k] } });
+                }
+                f["distribution"] = std::move(distribution);
+            } else {
+                f["distribution"] = nullptr;
+            }
+        }
         fields[sp.name]   = f;
     }
     common_json out = common_json::object();
