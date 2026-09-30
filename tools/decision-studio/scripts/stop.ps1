@@ -10,4 +10,4 @@ $command = (Get-CimInstance Win32_Process -Filter "ProcessId = $($saved.id)").Co
 $savedStart = ([datetime]$saved.started).ToUniversalTime()
 if ($proc.Path -ne $saved.executable -or $proc.StartTime.ToUniversalTime().Ticks -ne $savedStart.Ticks -or $command -notlike '*backend.app:app*') { throw 'A identidade do processo mudou; nenhum processo foi encerrado.' }
 Stop-Process -Id $proc.Id
-Write-Host 'Decision Studio encerrado. Arquivos e historico preservados.'
+Write-Host 'CAT Studio encerrado. Arquivos e historico preservados.'

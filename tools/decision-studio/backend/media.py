@@ -44,12 +44,19 @@ def inspect_media(path: Path, preview: Path) -> dict:
         cap.release()
 
 
-def frame_plan(media: dict, config: InferenceConfig) -> tuple[range, int]:
+def frame_plan(media: dict, config: InferenceConfig) -> tuple[range | list[int], int]:
     if media["kind"] == "image":
         return range(1), 1
     fps = media["fps"]
     first = math.ceil(config.start_seconds * fps)
     last = min(media["frame_count"], math.ceil((config.end_seconds or media["duration"]) * fps))
+    if config.video_mode == "uniform":
+        count = min(config.max_frames, max(0, last - first))
+        if count == 0:
+            return [], 0
+        if count == 1:
+            return [first + (last - first - 1) // 2], last - first
+        return [first + round(i * (last - first - 1) / (count - 1)) for i in range(count)], last - first
     stride = 1 if config.video_mode == "all" else max(1, round(config.frame_interval * fps))
     full = range(first, max(first, last), stride)
     return full[:config.max_frames], len(full)

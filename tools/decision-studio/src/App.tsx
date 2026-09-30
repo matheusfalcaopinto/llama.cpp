@@ -45,8 +45,11 @@ import type {
   Probe,
   Provider,
   Result,
-  SchemaField,
+  TollProfile,
 } from "./types";
+
+import { TollTable, TollResult } from "./Toll";
+import TollConfig from "./TollConfig";
 
 type Page = "workspace" | "history" | "providers";
 const bytes = (n: number) =>
@@ -108,210 +111,6 @@ function Badge({
   return <span className={`badge ${tone}`}>{children}</span>;
 }
 
-function SchemaEditor({
-  schema,
-  onChange,
-}: {
-  schema: Config["output_schema"];
-  onChange: (s: Config["output_schema"]) => void;
-}) {
-  const [raw, setRaw] = useState<string | null>(null),
-    [error, setError] = useState("");
-  const entries = Object.entries(schema);
-  function update(index: number, name: string, field: SchemaField) {
-    const copy = [...entries];
-    copy[index] = [name, field];
-    onChange(Object.fromEntries(copy));
-  }
-  return (
-    <section className="panel schema-panel">
-      <div className="section-title">
-        <div>
-          <Braces size={17} />
-          <h2>Estrutura de saída</h2>
-          <Badge>{entries.length} campos</Badge>
-        </div>
-        <button
-          className="text-button"
-          onClick={() => setRaw(JSON.stringify(schema, null, 2))}
-        >
-          Editar JSON <ArrowUpRight size={13} />
-        </button>
-      </div>
-      <p className="muted section-intro">
-        Defina as perguntas e os valores que o modelo poderá escolher.
-      </p>
-      <div className="schema-fields">
-        {entries.map(([name, f], i) => (
-          <div className="schema-field" key={i}>
-            <div className="field-heading">
-              <span className="field-number">
-                {String(i + 1).padStart(2, "0")}
-              </span>
-              <input
-                aria-label={`Nome do campo ${i + 1}`}
-                value={name}
-                onChange={(e) => update(i, e.target.value, f)}
-              />
-              <select
-                aria-label={`Tipo de ${name}`}
-                value={f.type}
-                onChange={(e) => {
-                  const type = e.target.value;
-                  update(i, name, {
-                    type,
-                    description: f.description,
-                    ...(type === "enum"
-                      ? { choices: ["opção_a", "opção_b"] }
-                      : type === "integer" || type === "number"
-                        ? {
-                            minimum: 0,
-                            maximum: 10,
-                            step: 1,
-                            aggregate: "mode",
-                          }
-                        : {}),
-                  });
-                }}
-              >
-                <option value="enum">Opções</option>
-                <option value="boolean">Sim / Não</option>
-                <option value="integer">Inteiro</option>
-                <option value="number">Número</option>
-              </select>
-              <button
-                className="icon-button"
-                title={`Remover ${name}`}
-                onClick={() =>
-                  onChange(
-                    Object.fromEntries(entries.filter((_, j) => j !== i)),
-                  )
-                }
-              >
-                <Trash2 size={14} />
-              </button>
-            </div>
-            <input
-              className="description-input"
-              aria-label={`Pergunta de ${name}`}
-              placeholder="Qual pergunta este campo responde?"
-              value={f.description || ""}
-              onChange={(e) =>
-                update(i, name, { ...f, description: e.target.value })
-              }
-            />
-            {f.type === "enum" && (
-              <Field label="Opções (separadas por vírgula)">
-                <input
-                  value={(f.choices || f.enum || []).join(",")}
-                  onChange={(e) =>
-                    update(i, name, {
-                      ...f,
-                      choices: e.target.value.split(",").map((s) => s.trim()),
-                    })
-                  }
-                />
-              </Field>
-            )}
-            {["integer", "number"].includes(f.type) && (
-              <div className="numeric-schema">
-                <NumberField
-                  label="Mínimo"
-                  value={f.minimum ?? 0}
-                  onChange={(minimum) => update(i, name, { ...f, minimum })}
-                />
-                <NumberField
-                  label="Máximo"
-                  value={f.maximum ?? 10}
-                  onChange={(maximum) => update(i, name, { ...f, maximum })}
-                />
-                <NumberField
-                  label="Passo"
-                  value={f.step ?? 1}
-                  step={0.1}
-                  min={0.001}
-                  onChange={(step) => update(i, name, { ...f, step })}
-                />
-                <Field label="Agregação">
-                  <select
-                    value={f.aggregate || "mode"}
-                    onChange={(e) =>
-                      update(i, name, { ...f, aggregate: e.target.value })
-                    }
-                  >
-                    <option value="mode">Moda</option>
-                    <option value="mean">Média → grade</option>
-                    <option value="median">Mediana</option>
-                  </select>
-                </Field>
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
-      <button
-        className="add-field"
-        onClick={() => {
-          let i = entries.length + 1;
-          while (schema[`campo_${i}`]) i++;
-          onChange({
-            ...schema,
-            [`campo_${i}`]: { type: "boolean", description: "" },
-          });
-        }}
-      >
-        <Plus size={15} /> Adicionar campo
-      </button>
-      {raw !== null && (
-        <div className="modal-backdrop">
-          <section className="modal">
-            <div className="section-title">
-              <h2>Editar estrutura JSON</h2>
-              <button className="icon-button" onClick={() => setRaw(null)}>
-                <X />
-              </button>
-            </div>
-            <p className="muted">
-              Formato compacto: nome → tipo, descrição e opções/limites.
-            </p>
-            <textarea
-              className="code"
-              rows={18}
-              value={raw}
-              onChange={(e) => setRaw(e.target.value)}
-            />
-            {error && <p className="error-text">{error}</p>}
-            <button
-              className="primary"
-              onClick={() => {
-                try {
-                  const s = JSON.parse(raw);
-                  if (
-                    !s ||
-                    Array.isArray(s) ||
-                    typeof s !== "object" ||
-                    Object.values(s).some(
-                      (f) => !f || typeof f !== "object" || !("type" in f),
-                    )
-                  )
-                    throw Error("Use um objeto de campos com type.");
-                  onChange(s);
-                  setRaw(null);
-                  setError("");
-                } catch (e) {
-                  setError(String(e));
-                }
-              }}
-            >
-              <Check size={16} /> Aplicar estrutura
-            </button>
-          </section>
-        </div>
-      )}
-    </section>
-  );
-}
-
 function ResultCard({ result: r, job }: { result: Result; job: Job }) {
   const [expanded, setExpanded] = useState(false);
   return (
@@ -355,6 +154,8 @@ function ResultCard({ result: r, job }: { result: Result; job: Job }) {
       </div>
       {r.error ? (
         <p className="error-text">{r.error}</p>
+      ) : r.classification ? (
+        <TollResult result={r.classification} />
       ) : (
         <div className="decision-fields">
           {Object.entries(r.fields || {}).map(([name, f]) => (
@@ -404,7 +205,7 @@ function ResultCard({ result: r, job }: { result: Result; job: Job }) {
             ` · ${r.usage.image_tokens} tokens visuais`}
         </small>
         <button className="text-button" onClick={() => setExpanded(!expanded)}>
-          {expanded ? "Recolher" : "Distribuições e detalhes"}{" "}
+          {expanded ? "Recolher" : "Mídias e dados originais"}{" "}
           <ChevronRight size={13} className={expanded ? "rotate" : ""} />
         </button>
       </div>
@@ -605,8 +406,8 @@ function ProvidersPage({
           <strong>Inferência na sua infraestrutura</strong>
           <p>
             Os arquivos ficam nesta máquina e as imagens selecionadas são
-            enviadas ao provedor configurado. Para decisões visuais nativas,
-            inicie a branch com um modelo de visão, seu mmproj e{" "}
+            enviadas ao provedor configurado. Para classificações visuais
+            nativas, inicie a branch com um modelo de visão, seu mmproj e{" "}
             <code>--decision-seqs 64</code>.
           </p>
         </div>
@@ -619,6 +420,7 @@ export default function App() {
   const [page, setPage] = useState<Page>("workspace"),
     [config, setConfig] = useState<Config | null>(null),
     [providers, setProviders] = useState<Provider[]>([]);
+  const [profiles, setProfiles] = useState<TollProfile[]>([]);
   const [media, setMedia] = useState<Media[]>([]),
     [selected, setSelected] = useState<string[]>([]),
     [jobs, setJobs] = useState<Job[]>([]),
@@ -630,7 +432,6 @@ export default function App() {
     [dragging, setDragging] = useState(false),
     [tab, setTab] = useState<"input" | "results">("input"),
     [name, setName] = useState(""),
-    [probeResult, setProbeResult] = useState<Probe>(),
     [onlyReview, setOnlyReview] = useState(false);
   const filesRef = useRef<HTMLInputElement>(null),
     folderRef = useRef<HTMLInputElement>(null),
@@ -642,34 +443,35 @@ export default function App() {
   }, []);
   useEffect(() => {
     Promise.all([
-      api<{ config: Config }>("/defaults"),
+      api<{ config: Config }>("/toll/defaults"),
       api<{ providers: Provider[] }>("/settings"),
       api<Media[]>("/media"),
       api<Job[]>("/jobs"),
+      api<TollProfile[]>("/toll/profiles"),
     ])
-      .then(([d, s, m, j]) => {
+      .then(([d, s, m, j, tables]) => {
         let c = d.config;
         try {
           const saved = JSON.parse(
-            localStorage.getItem("decision-studio-config-v1") || "null",
+            localStorage.getItem("cat-studio-config-v1") || "null",
           );
           if (saved) c = { ...c, ...saved };
         } catch {}
+        if (!tables.some((p) => p.id === c.toll_profile))
+          c.toll_profile = d.config.toll_profile;
+        setProfiles(tables);
         setConfig(c);
         setProviders(s.providers);
         setMedia(m);
-        setJobs(j);
+        setJobs(j.filter((job) => job.config.task === "toll_cat"));
       })
       .catch((e) => notify(String(e)));
     return () => clearTimeout(toastTimer.current);
   }, [notify]);
   useEffect(() => {
     if (config)
-      localStorage.setItem("decision-studio-config-v1", JSON.stringify(config));
+      localStorage.setItem("cat-studio-config-v1", JSON.stringify(config));
   }, [config]);
-  useEffect(() => {
-    setProbeResult(undefined);
-  }, [config?.provider_id, providers]);
   const refreshJob = useCallback(async (id: string, limit = 100) => {
     const [j, r] = await Promise.all([
       api<Job>(`/jobs/${id}`),
@@ -739,8 +541,8 @@ export default function App() {
     if (!config) return;
     setBusy("run");
     try {
-      const j = await api<Job>("/jobs", {
-        name: name.trim() || `Execução ${new Date().toLocaleString("pt-BR")}`,
+      const j = await api<Job>("/toll/jobs", {
+        name: name.trim() || `CAT ${new Date().toLocaleString("pt-BR")}`,
         media_ids: selected,
         config,
       });
@@ -783,7 +585,7 @@ export default function App() {
             <Scan size={23} />
           </span>
           <span>
-            decision<span className="brand-sub">STUDIO</span>
+            CAT<span className="brand-sub">STUDIO</span>
           </span>
         </a>
         <p className="nav-label">WORKSPACE</p>
@@ -793,14 +595,16 @@ export default function App() {
             onClick={() => setPage("workspace")}
           >
             <Layers3 size={19} />
-            <span>Inferência</span>
+            <span>Classificar veículos</span>
           </button>
           <button
             className={page === "history" ? "active" : ""}
             onClick={() => {
               setPage("history");
               api<Job[]>("/jobs")
-                .then(setJobs)
+                .then((j) =>
+                  setJobs(j.filter((job) => job.config.task === "toll_cat")),
+                )
                 .catch((e) => notify(String(e)));
             }}
           >
@@ -823,11 +627,11 @@ export default function App() {
             <Network size={14} />
           </div>
           <p>
-            Visão para decisões.
+            Veículos por categoria.
             <br />
             Na sua infraestrutura.
           </p>
-          <span className="version">v0.1 · llama.cpp</span>
+          <span className="version">v0.2 · CAT + llama.cpp</span>
         </div>
       </aside>
       <div className="main-shell">
@@ -837,7 +641,7 @@ export default function App() {
             <ChevronRight size={14} />
             <strong>
               {page === "workspace"
-                ? "Inferência visual"
+                ? "Classificação CAT"
                 : page === "history"
                   ? "Histórico"
                   : "Provedores"}
@@ -907,7 +711,7 @@ export default function App() {
                       </small>
                     </div>
                     <span>
-                      {j.completed}/{j.total} decisões
+                      {j.completed}/{j.total} classificações
                     </span>
                     <Badge
                       tone={
@@ -936,12 +740,12 @@ export default function App() {
             <div className="workspace-heading">
               <div>
                 <p className="eyebrow">
-                  <span /> VISUAL INTELLIGENCE
+                  <span /> CATEGORIAS DE PEDÁGIO
                 </p>
-                <h1>De imagens a decisões.</h1>
+                <h1>Um veículo. Todas as hipóteses.</h1>
                 <p>
-                  Organize suas entradas. Defina as perguntas. Execute
-                  localmente.
+                  Envie imagens ou vídeos. Compare os CAT e veja a escolha do
+                  modelo.
                 </p>
               </div>
               <div className="heading-actions">
@@ -967,7 +771,7 @@ export default function App() {
                   ) : (
                     <Play size={16} fill="currentColor" />
                   )}{" "}
-                  Executar inferência <span>{selected.length}</span>
+                  Classificar veículos <span>{selected.length}</span>
                 </button>
               </div>
             </div>
@@ -1013,7 +817,7 @@ export default function App() {
                       <h2>
                         {busy === "upload"
                           ? `Importando arquivos · ${progress}%`
-                          : "Adicione seu material visual"}
+                          : "Adicione as mídias dos veículos"}
                       </h2>
                       <p>
                         Arraste imagens e vídeos para cá ou escolha os arquivos.
@@ -1189,18 +993,19 @@ export default function App() {
                         </details>
                       )}
                     </section>
-                    <SchemaEditor
-                      schema={config.output_schema}
-                      onChange={(output_schema) => patch({ output_schema })}
+                    <TollTable
+                      profile={profiles.find(
+                        (p) => p.id === config.toll_profile,
+                      )}
                     />
                   </>
                 ) : !job ? (
                   <div className="panel empty-state">
                     <Braces size={34} />
-                    <h2>Suas decisões, campo a campo</h2>
+                    <h2>O CAT sugerido e todas as alternativas</h2>
                     <p>
-                      Execute uma inferência para visualizar valores,
-                      distribuições e dados originais.
+                      Classifique os veículos para comparar os scores por CAT e
+                      identificar os casos para revisão.
                     </p>
                   </div>
                 ) : (
@@ -1226,7 +1031,7 @@ export default function App() {
                             {job.completed}
                             <small> / {job.total}</small>
                           </strong>
-                          <span>decisões processadas</span>
+                          <span>classificações processadas</span>
                         </div>
                         <div>
                           <strong>{job.review}</strong>
@@ -1332,368 +1137,17 @@ export default function App() {
                   </>
                 )}
               </main>
-              <aside className="config-panel">
-                <div className="config-title">
-                  <Settings2 size={17} />
-                  <h2>Configuração</h2>
-                  <span className="tiny-dot" />
-                </div>
-                <div className="config-section">
-                  <p className="config-label">01 / MODELO & EXECUÇÃO</p>
-                  <Field label="Provedor">
-                    <select
-                      value={config.provider_id}
-                      onChange={(e) =>
-                        patch({ provider_id: e.target.value, model: "" })
-                      }
-                    >
-                      <option value="" disabled>
-                        Selecione um servidor
-                      </option>
-                      {providers.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.name}
-                        </option>
-                      ))}
-                    </select>
-                  </Field>
-                  <Field
-                    label="Modelo"
-                    hint="Deixe vazio para usar o modelo carregado no servidor."
-                  >
-                    <input
-                      list="model-options"
-                      placeholder="Modelo padrão do servidor"
-                      value={config.model}
-                      onChange={(e) => patch({ model: e.target.value })}
-                    />
-                    <datalist id="model-options">
-                      {probeResult?.models.map((m) => (
-                        <option key={m.id} value={m.id} />
-                      ))}
-                    </datalist>
-                  </Field>
-                  <div className="provider-link">
-                    <button
-                      className="text-button"
-                      disabled={!currentProvider || !!busy}
-                      onClick={async () => {
-                        if (!currentProvider) return;
-                        setBusy("probe");
-                        try {
-                          const { has_api_key: _, ...p } = currentProvider;
-                          setProbeResult(
-                            await api<Probe>("/providers/test", p),
-                          );
-                        } catch (e) {
-                          notify(String(e));
-                        } finally {
-                          setBusy("");
-                        }
-                      }}
-                    >
-                      {busy === "probe" ? (
-                        <Loader2 className="spin" size={12} />
-                      ) : (
-                        <Radio size={12} />
-                      )}{" "}
-                      Verificar servidor
-                    </button>
-                    <button
-                      className="text-button"
-                      onClick={() => setPage("providers")}
-                    >
-                      Gerenciar <ArrowUpRight size={12} />
-                    </button>
-                  </div>
-                  {probeResult && (
-                    <p
-                      className={`connection-summary ${probeResult.models.some((m) => m.decision?.vision) ? "ok" : "warning"}`}
-                    >
-                      {probeResult.models.some((m) => m.decision?.vision)
-                        ? "● Decisão visual disponível"
-                        : "● Servidor conectado; decisão visual não confirmada"}
-                    </p>
-                  )}
-                  <Field label="Modo de inferência">
-                    <select
-                      value={config.pipeline}
-                      onChange={(e) =>
-                        patch({
-                          pipeline: e.target.value as Config["pipeline"],
-                        })
-                      }
-                    >
-                      <option value="native_decision">
-                        Decisão visual nativa
-                      </option>
-                      <option value="vision_json">
-                        JSON gerado pelo modelo
-                      </option>
-                    </select>
-                  </Field>
-                  <p className="config-help">
-                    {config.pipeline === "native_decision"
-                      ? "Imagens entram diretamente no modelo. Cada campo recebe valores e probabilidades restritos às suas opções."
-                      : "Gera uma resposta JSON estruturada. Este modo não fornece probabilidades de decisão."}
-                  </p>
-                </div>
-                <div className="config-section">
-                  <p className="config-label">02 / CONTEXTO VISUAL</p>
-                  <Field label="Como agrupar as entradas">
-                    <select
-                      value={config.grouping}
-                      onChange={(e) =>
-                        patch({
-                          grouping: e.target.value as Config["grouping"],
-                        })
-                      }
-                    >
-                      <option value="individual">
-                        Individual · uma decisão por imagem
-                      </option>
-                      <option value="together">
-                        Conjunto · todas na mesma decisão
-                      </option>
-                      <option value="directory">
-                        Por pasta · uma decisão por grupo
-                      </option>
-                    </select>
-                  </Field>
-                  <p className="config-help">
-                    {config.grouping === "individual"
-                      ? "As imagens são independentes. Em vídeos, você pode reunir quadros consecutivos em uma janela."
-                      : "Cada conjunto compartilha um contexto visual. Máximo de 16 imagens/quadros por conjunto. A ordem da seleção é preservada."}
-                  </p>
-                  {videos.length > 0 && (
-                    <details open className="video-settings">
-                      <summary>
-                        <Film size={14} /> Amostragem de vídeo
-                      </summary>
-                      <Field label="Extração">
-                        <select
-                          value={config.video_mode}
-                          onChange={(e) =>
-                            patch({
-                              video_mode: e.target
-                                .value as Config["video_mode"],
-                            })
-                          }
-                        >
-                          <option value="interval">Por intervalo</option>
-                          <option value="all">
-                            Todos os quadros (até o limite)
-                          </option>
-                        </select>
-                      </Field>
-                      <div className="two-cols">
-                        {config.video_mode === "interval" && (
-                          <NumberField
-                            label="Intervalo (s)"
-                            min={0.04}
-                            step={0.1}
-                            value={config.frame_interval}
-                            onChange={(frame_interval) =>
-                              patch({ frame_interval })
-                            }
-                          />
-                        )}
-                        <NumberField
-                          label="Limite de quadros"
-                          min={1}
-                          max={5000}
-                          value={config.max_frames}
-                          onChange={(max_frames) => patch({ max_frames })}
-                        />
-                      </div>
-                      <div className="two-cols">
-                        <NumberField
-                          label="Início (s)"
-                          min={0}
-                          step={0.1}
-                          value={config.start_seconds}
-                          onChange={(start_seconds) => patch({ start_seconds })}
-                        />
-                        <Field label="Fim (s)">
-                          <input
-                            type="number"
-                            min={0}
-                            step={0.1}
-                            placeholder="Até o final"
-                            value={config.end_seconds ?? ""}
-                            onChange={(e) =>
-                              patch({
-                                end_seconds: e.target.value
-                                  ? Number(e.target.value)
-                                  : null,
-                              })
-                            }
-                          />
-                        </Field>
-                      </div>
-                      {config.grouping === "individual" && (
-                        <NumberField
-                          label="Quadros por decisão"
-                          min={1}
-                          max={16}
-                          value={config.video_group_size}
-                          onChange={(video_group_size) =>
-                            patch({ video_group_size })
-                          }
-                        />
-                      )}
-                      <small>
-                        Vídeos são sequências de quadros com timestamps. Áudio
-                        não é processado.
-                      </small>
-                    </details>
-                  )}
-                  <Field label="Contexto adicional">
-                    <textarea
-                      rows={3}
-                      placeholder="Ex.: câmera 1, entrada principal, turno da tarde…"
-                      value={config.context}
-                      onChange={(e) => patch({ context: e.target.value })}
-                    />
-                  </Field>
-                </div>
-                <div className="config-section">
-                  <p className="config-label">03 / INSTRUÇÕES</p>
-                  <Field label="Orientação para o modelo">
-                    <textarea
-                      rows={4}
-                      value={config.instructions}
-                      onChange={(e) => patch({ instructions: e.target.value })}
-                    />
-                  </Field>
-                  <Field label="Nome da execução">
-                    <input
-                      placeholder="Gerado automaticamente"
-                      value={name}
-                      onChange={(e) => setName(e.target.value)}
-                    />
-                  </Field>
-                </div>
-                <div className="config-section">
-                  <details>
-                    <summary>
-                      Parâmetros avançados <Settings2 size={14} />
-                    </summary>
-                    {config.pipeline === "native_decision" ? (
-                      <>
-                        <Field label="Algoritmo de decisão">
-                          <select
-                            value={config.decision_mode}
-                            onChange={(e) =>
-                              patch({
-                                decision_mode: e.target
-                                  .value as Config["decision_mode"],
-                              })
-                            }
-                          >
-                            <option value="auto">Auto</option>
-                            <option value="tree">
-                              Tree · distribuição completa
-                            </option>
-                            <option value="greedy">
-                              Greedy · caminho escolhido
-                            </option>
-                          </select>
-                        </Field>
-                        <div className="two-cols">
-                          <NumberField
-                            label="Tree max"
-                            value={config.tree_max}
-                            min={1}
-                            max={255}
-                            onChange={(tree_max) => patch({ tree_max })}
-                          />
-                          <NumberField
-                            label="Contextos / lote"
-                            value={config.batch_size}
-                            min={1}
-                            max={64}
-                            onChange={(batch_size) => patch({ batch_size })}
-                          />
-                        </div>
-                        <p className="config-help">
-                          O contexto visual é reutilizado entre campos da mesma
-                          decisão. O cache entre requisições visuais ainda não
-                          está habilitado.
-                        </p>
-                      </>
-                    ) : (
-                      <>
-                        <div className="two-cols">
-                          <NumberField
-                            label="Temperatura"
-                            value={config.temperature}
-                            min={0}
-                            max={2}
-                            step={0.1}
-                            onChange={(temperature) => patch({ temperature })}
-                          />
-                          <NumberField
-                            label="Top P"
-                            value={config.top_p}
-                            min={0.01}
-                            max={1}
-                            step={0.05}
-                            onChange={(top_p) => patch({ top_p })}
-                          />
-                        </div>
-                        <NumberField
-                          label="Tokens de saída"
-                          value={config.max_tokens}
-                          min={32}
-                          max={16384}
-                          onChange={(max_tokens) => patch({ max_tokens })}
-                        />
-                        <NumberField
-                          label="Seed"
-                          value={config.seed ?? 42}
-                          min={0}
-                          onChange={(seed) => patch({ seed })}
-                        />
-                      </>
-                    )}
-                    <div className="two-cols">
-                      <NumberField
-                        label="Lado máximo (px)"
-                        value={config.image_max_side}
-                        min={224}
-                        max={4096}
-                        onChange={(image_max_side) => patch({ image_max_side })}
-                      />
-                      <NumberField
-                        label="Qualidade JPEG"
-                        value={config.jpeg_quality}
-                        min={40}
-                        max={100}
-                        onChange={(jpeg_quality) => patch({ jpeg_quality })}
-                      />
-                    </div>
-                    <NumberField
-                      label="Revisar se probabilidade <"
-                      value={config.review_threshold}
-                      min={0}
-                      max={1}
-                      step={0.05}
-                      onChange={(review_threshold) =>
-                        patch({ review_threshold })
-                      }
-                    />
-                    <small>
-                      A sinalização de revisão é uma regra local; não muda o
-                      resultado do modelo.
-                    </small>
-                  </details>
-                </div>
-                <div className="config-footer">
-                  <ShieldCheck size={14} />
-                  <span>Arquivos e histórico salvos localmente</span>
-                </div>
-              </aside>
+              <TollConfig
+                config={config}
+                patch={patch}
+                profiles={profiles}
+                providers={providers}
+                videos={videos.length > 0}
+                name={name}
+                setName={setName}
+                manage={() => setPage("providers")}
+                notify={notify}
+              />
             </div>
           </>
         )}

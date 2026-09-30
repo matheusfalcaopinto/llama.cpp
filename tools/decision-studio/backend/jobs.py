@@ -11,6 +11,7 @@ from .media import Sampler, frame_plan
 from .models import InferenceConfig, JobRequest, Provider, validate_schema
 from .providers import decide, safe_error, vision_json
 from .store import Store, now
+from .toll import classify, prepare_config
 
 TERMINAL = {'completed', 'partial', 'failed', 'cancelled', 'interrupted'}
 
@@ -24,11 +25,11 @@ def plan(media: list[dict], config: InferenceConfig) -> tuple[list[list[dict]], 
         lengths[m['id']] = len(indices)
         if not indices:
             raise ValueError(f'{m["name"]}: o intervalo selecionado não contém quadros.')
-        if requested > len(indices):
+        if requested > len(indices) and config.video_mode != 'uniform':
             warnings.append(f'{m["name"]}: {len(indices)} de {requested} quadros; limite de amostragem aplicado.')
     if config.grouping == 'individual':
         groups = [[m] for m in media]
-        total = sum(math.ceil(lengths[m['id']] / (config.video_group_size if m['kind'] == 'video' else 1)) for m in media)
+        total = len(media) if config.task == 'toll_cat' else sum(math.ceil(lengths[m['id']] / (config.video_group_size if m['kind'] == 'video' else 1)) for m in media)
     else:
         by_key = OrderedDict()
         for m in media:
@@ -68,6 +69,9 @@ class Runner:
             await asyncio.gather(self.worker, return_exceptions=True)
 
     def submit(self, request: JobRequest, provider: Provider) -> dict:
+        profile = None
+        if request.config.task == 'toll_cat':
+            request.config, profile = prepare_config(request.config)
         if self.queue.full():
             raise ValueError('Fila cheia. Aguarde uma execução terminar.')
         if len(set(request.media_ids)) != len(request.media_ids):
@@ -82,6 +86,8 @@ class Runner:
                'config': request.config.model_dump(), 'media_ids': request.media_ids,
                'provider': provider.model_dump(exclude={'api_key'}), 'total': total, 'completed': 0,
                'failed': 0, 'review': 0, 'warnings': warnings}
+        if profile:
+            job['toll_profile'] = profile
         self.store.put('jobs', job_id, job)
         self.events[job_id] = asyncio.Event()
         self.queue.put_nowait((job, groups, provider.model_copy(deep=True)))
@@ -128,7 +134,7 @@ class Runner:
                             break
                         pending.append(sample)
                         width = config.video_group_size if media['kind'] == 'video' else 1
-                        if config.grouping == 'individual' and len(pending) == width:
+                        if config.task != 'toll_cat' and config.grouping == 'individual' and len(pending) == width:
                             yield pending
                             pending = []
                 finally:
@@ -161,7 +167,13 @@ class Runner:
             except Exception as exc:
                 results = [{'error': safe_error(exc, [provider])} for _ in batch]
             for samples, output in zip(batch, results):
+                if config.task == 'toll_cat' and not output.get('error'):
+                    try:
+                        output['classification'] = classify(output, job['toll_profile'], config)
+                    except ValueError as exc:
+                        output = {'error': safe_error(exc, [provider])}
                 review = bool(output.get('error')) or any(f.get('probability') is not None and f['probability'] < config.review_threshold for f in output.get('fields', {}).values())
+                review = review or output.get('classification', {}).get('needs_review', False)
                 seq = job['completed']
                 row = {'seq': seq, 'created_at': now(), 'status': 'error' if output.get('error') else 'ok',
                        'samples': [{k: v for k, v in s.items() if k != 'image'} for s in samples],

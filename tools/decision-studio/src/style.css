@@ -1781,3 +1781,229 @@ details[open] > summary:after {
     animation: none;
   }
 }
+
+.toll-table-panel {
+  padding: 22px;
+}
+.toll-table-scroll {
+  overflow-x: auto;
+}
+.toll-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.toll-table th {
+  color: var(--muted);
+  text-align: left;
+  font-weight: 500;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.toll-table td,
+.toll-table th {
+  border-bottom: 1px solid var(--border);
+  padding: 12px 8px;
+}
+.toll-table td:first-child {
+  white-space: nowrap;
+  color: var(--accent);
+}
+.toll-table td:nth-child(2) {
+  min-width: 180px;
+  line-height: 1.5;
+}
+.administrative-note {
+  display: block;
+  color: #d5b075;
+  font-size: 10px;
+}
+.toll-table-note {
+  color: var(--muted);
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  line-height: 1.6;
+  font-size: 11px;
+  margin-top: 16px;
+}
+.toll-table-note svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.toll-result {
+  padding: 4px 19px 16px;
+}
+.cat-summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 18px;
+  background: #aee5730b;
+  border: 1px solid #aee57330;
+  border-radius: 9px;
+  gap: 14px;
+}
+.cat-summary strong {
+  display: block;
+  font-size: 29px;
+  letter-spacing: -0.05em;
+  color: var(--accent);
+  margin: 6px 0;
+}
+.cat-summary p {
+  line-height: 1.5;
+  font-size: 12px;
+}
+.cat-summary small {
+  font-size: 10px;
+  color: var(--muted);
+}
+.cat-confidence {
+  text-align: right;
+  flex-shrink: 0;
+}
+.cat-confidence b {
+  display: block;
+  font-size: 24px;
+  margin-bottom: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.cat-review {
+  background: #daa1520b;
+  border-color: #daa15235;
+}
+.cat-review strong {
+  color: #edbf80;
+}
+.cat-profile {
+  color: var(--muted);
+  font-size: 10px;
+  margin: 12px 0;
+}
+.review-reasons {
+  margin: 12px 0;
+  padding: 12px 12px 12px 28px;
+  background: #d6a25808;
+  color: #d9b37f;
+  font-size: 11px;
+  line-height: 1.8;
+  border-radius: 6px;
+}
+.cat-ranking-title {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 18px 0 7px;
+  font-weight: 600;
+  font-size: 12px;
+}
+.cat-ranking-title small {
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 10px;
+}
+.cat-ranking-row {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr) 118px;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.cat-ranking-row.chosen {
+  background: #b6ef7009;
+  border-radius: 5px;
+}
+.cat-code {
+  font-weight: 600;
+  font-size: 11px;
+  white-space: nowrap;
+  display: flex;
+  gap: 3px;
+  align-items: center;
+}
+.chosen .cat-code {
+  color: var(--accent);
+}
+.cat-details span {
+  font-size: 11px;
+  line-height: 1.5;
+}
+.cat-details small {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  margin-top: 3px;
+}
+.cat-score {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.cat-score progress {
+  height: 4px;
+  width: 60px;
+  flex: 1;
+}
+.cat-score b {
+  font-size: 11px;
+  width: 45px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.uncertain-score {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 8px;
+  font-size: 10px;
+  color: var(--muted);
+}
+.uncertain-score.chosen {
+  color: #edbf80;
+}
+@media (max-width: 600px) {
+  .toll-table-panel {
+    padding: 16px;
+  }
+  .toll-table {
+    font-size: 10px;
+  }
+  .toll-result {
+    padding: 4px 12px 12px;
+  }
+  .cat-summary {
+    padding: 12px;
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .cat-summary strong {
+    font-size: 25px;
+  }
+  .cat-summary p {
+    font-size: 10px;
+  }
+  .cat-confidence b {
+    font-size: 19px;
+  }
+  .cat-confidence {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    text-align: left;
+  }
+  .cat-ranking-row {
+    grid-template-columns: 52px minmax(0, 1fr) 45px;
+    gap: 7px;
+    padding: 10px 2px;
+  }
+  .cat-score progress {
+    display: none;
+  }
+  .cat-details span {
+    font-size: 10px;
+  }
+}

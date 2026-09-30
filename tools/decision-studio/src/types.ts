@@ -9,6 +9,9 @@ export type SchemaField = {
   aggregate?: string;
 };
 export type Config = {
+  task: "visual" | "toll_cat";
+  toll_profile: string;
+  review_margin: number;
   pipeline: "native_decision" | "vision_json";
   provider_id: string;
   model: string;
@@ -27,7 +30,7 @@ export type Config = {
   seed: number | null;
   image_max_side: number;
   jpeg_quality: number;
-  video_mode: "interval" | "all";
+  video_mode: "interval" | "all" | "uniform";
   frame_interval: number;
   max_frames: number;
   start_seconds: number;
@@ -66,6 +69,7 @@ export type Probe = {
   latency_ms: number;
 };
 export type Job = {
+  toll_profile?: TollProfile;
   id: string;
   name: string;
   status: string;
@@ -97,6 +101,7 @@ export type ResultField = {
   interval_p10_p90?: number[];
 };
 export type Result = {
+  classification?: Classification;
   seq: number;
   samples: Sample[];
   fields?: Record<string, ResultField>;
@@ -109,4 +114,35 @@ export type Result = {
   raw?: unknown;
   request?: unknown;
   score_kind?: string;
+};
+export type TollCategory = {
+  code: string;
+  number: number;
+  label: string;
+  axles: number | null;
+  wheels: string | null;
+  multiplier: number | null;
+  visual: boolean;
+};
+export type TollProfile = {
+  id: string;
+  name: string;
+  version: string;
+  source_url: string;
+  verified_at: string;
+  categories: TollCategory[];
+};
+export type Classification = {
+  profile_name: string;
+  profile_version: string;
+  selected: string;
+  suggested_cat: string | null;
+  selected_probability: number;
+  uncertain_probability: number;
+  margin: number;
+  evidence: string;
+  status: "suggested" | "review" | "inconclusive";
+  needs_review: boolean;
+  reasons: string[];
+  ranking: (TollCategory & { probability: number | null; selected: boolean })[];
 };

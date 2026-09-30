@@ -19,6 +19,11 @@ $url = "http://127.0.0.1:$Port"
 $existing = $null
 try { $existing = Invoke-RestMethod "$url/api/health" -TimeoutSec 2 } catch {}
 if ($existing -and $existing.application -ne 'decision-studio') { throw "A porta $Port esta ocupada por outra aplicacao." }
+if ($existing -and $existing.edition -ne 'toll-cat') {
+    & (Join-Path $PSScriptRoot 'stop.ps1') -Port $Port
+    try { $existing = Invoke-RestMethod "$url/api/health" -TimeoutSec 2 } catch { $existing = $null }
+    if ($existing) { throw 'Uma versao anterior ocupa esta porta. Encerre o processo antes de iniciar o CAT Studio.' }
+}
 if (-not $existing) {
     $logDir = Join-Path $studioRoot 'logs'
     New-Item -ItemType Directory -Path $logDir -Force | Out-Null
@@ -32,7 +37,7 @@ if (-not $existing) {
     }
     if (-not $ready) { throw 'O servidor ainda nao respondeu. Consulte os logs antes de tentar novamente.' }
 }
-Write-Host "Decision Studio: $url"
+Write-Host "CAT Studio: $url"
 if ($Bind -eq '0.0.0.0') {
     Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -ne '127.0.0.1' -and $_.IPAddress -notlike '169.254.*' -and $_.AddressState -eq 'Preferred' } | ForEach-Object { Write-Host "LAN ($($_.InterfaceAlias)): http://$($_.IPAddress):$Port" }
 }

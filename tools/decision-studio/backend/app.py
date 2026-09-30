@@ -17,9 +17,10 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from .jobs import Runner, TERMINAL
 from .media import IMAGE_EXT, VIDEO_EXT, inspect_media
-from .models import InferenceConfig, JobRequest, Provider, Settings
+from .models import InferenceConfig, JobRequest, Provider, Settings, TollJobRequest
 from .providers import probe, safe_error
 from .store import Store, now
+from .toll import PROFILES, prepare_config
 
 PROJECT = Path(__file__).resolve().parent.parent
 MAX_FILE = 512 * 1024 * 1024
@@ -41,7 +42,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             await app.state.runner.stop()
             store.close()
 
-    app = FastAPI(title='Decision Studio', version='0.1.0', lifespan=lifespan)
+    app = FastAPI(title='CAT Studio', version='0.2.0', lifespan=lifespan)
 
     @app.middleware('http')
     async def local_origin(request: Request, call_next):
@@ -77,7 +78,16 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
     @app.get('/api/health')
     def health():
-        return {'status': 'ok', 'application': 'decision-studio', 'version': '0.1.0', 'hostname': socket.gethostname()}
+        return {'status': 'ok', 'application': 'decision-studio', 'edition': 'toll-cat', 'version': '0.2.0', 'hostname': socket.gethostname()}
+
+    @app.get('/api/toll/profiles')
+    def toll_profiles():
+        return list(PROFILES.values())
+
+    @app.get('/api/toll/defaults')
+    def toll_defaults():
+        config, _ = prepare_config(InferenceConfig(task='toll_cat', video_mode='uniform', max_frames=8))
+        return {'config': config.model_dump()}
 
     @app.get('/api/defaults')
     def defaults():
@@ -172,6 +182,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
+    @app.post('/api/toll/jobs', status_code=202)
+    def toll_submit(body: TollJobRequest):
+        body.config.task = 'toll_cat'
+        return submit(body)
+
     @app.get('/api/jobs/{job_id}')
     def job_detail(job_id: str):
         return get_job(job_id)
@@ -220,6 +235,21 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     output.seek(0); output.truncate(0)
                     writer.writerow([("'" + str(v)) if str(v).lstrip().startswith(('=', '+', '-', '@')) else v for v in values])
                     return output.getvalue()
+                if job['config'].get('task') == 'toll_cat':
+                    yield '\ufeff' + line(['seq', 'files', 'timestamps_seconds', 'status', 'profile_id', 'profile_version',
+                                           'model_choice', 'suggested_cat', 'candidate', 'candidate_label', 'probability',
+                                           'selected', 'uncertain_probability', 'margin', 'evidence', 'needs_review', 'reasons', 'error'])
+                    for row in rows():
+                        c = row.get('classification', {})
+                        for item in c.get('ranking') or [{}]:
+                            yield line([row['seq'], ' | '.join(s['name'] for s in row['samples']),
+                                        ' | '.join(str(s.get('timestamp', '')) for s in row['samples']),
+                                        c.get('status', row['status']), job['toll_profile']['id'], job['toll_profile']['version'],
+                                        c.get('selected', ''), c.get('suggested_cat') or '', item.get('code', ''),
+                                        item.get('label', ''), item.get('probability') if item.get('probability') is not None else '',
+                                        item.get('selected', ''), c.get('uncertain_probability', ''), c.get('margin', ''),
+                                        c.get('evidence', ''), row['needs_review'], ' | '.join(c.get('reasons', [])), row.get('error', '')])
+                    return
                 yield '\ufeff' + line(['seq', 'files', 'timestamps_seconds', 'status', 'field', 'value', 'probability', 'expected_value', 'needs_review', 'error'])
                 for row in rows():
                     fields = row.get('fields') or {'': {}}

@@ -50,6 +50,9 @@ class Settings(StrictModel):
 
 
 class InferenceConfig(StrictModel):
+    task: Literal["visual", "toll_cat"] = "visual"
+    toll_profile: str = Field(default="antt_eco050", max_length=80)
+    review_margin: float = Field(default=0.15, ge=0, le=1)
     pipeline: Literal["native_decision", "vision_json"] = "native_decision"
     provider_id: str = "local"
     model: str = Field(default="", max_length=250)
@@ -68,7 +71,7 @@ class InferenceConfig(StrictModel):
     seed: int | None = Field(default=42, ge=0, le=2147483647)
     image_max_side: int = Field(default=1280, ge=224, le=4096)
     jpeg_quality: int = Field(default=90, ge=40, le=100)
-    video_mode: Literal["interval", "all"] = "interval"
+    video_mode: Literal["interval", "all", "uniform"] = "interval"
     frame_interval: float = Field(default=2, ge=0.04, le=3600)
     max_frames: int = Field(default=120, ge=1, le=5000)
     start_seconds: float = Field(default=0, ge=0, le=86400)
@@ -86,6 +89,16 @@ class JobRequest(StrictModel):
     name: str = Field(default="Nova execução", min_length=1, max_length=150)
     media_ids: list[str] = Field(min_length=1, max_length=500)
     config: InferenceConfig = Field(default_factory=InferenceConfig)
+
+
+class TollInferenceConfig(InferenceConfig):
+    task: Literal["toll_cat"] = "toll_cat"
+    video_mode: Literal["interval", "all", "uniform"] = "uniform"
+    max_frames: int = Field(default=8, ge=1, le=16)
+
+
+class TollJobRequest(JobRequest):
+    config: TollInferenceConfig = Field(default_factory=TollInferenceConfig)
 
 
 def validate_schema(schema: dict) -> dict:
